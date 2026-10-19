@@ -1,0 +1,11 @@
+{
+  "name": "smartcm-tablet-yearend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "스마트CM 태블릿PC 연말 사용 보고 — 현장 설문과 관리자 대시보드",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@vercel/blob": "2.8.0"
+  }
+}
