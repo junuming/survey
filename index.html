@@ -836,7 +836,7 @@ async function init(){
     S.config = normCfg((pub && pub.config) || {}); S.cfgLoaded = true;
     S.summary = { total: (pub && pub.total) || 0, sites: (pub && pub.sites) || 0 };
     S.server = true;
-  } catch (e) { S.server = false; }
+  } catch (e) { S.server = false; S.serverErr = errText(e); }
   S.cap.loaded = true;
   if (S.server) await loadAdmin('', true);
   onData('cap');
@@ -979,6 +979,7 @@ function renderHome(){
     .map(r => `<tr><td>${r[0]}</td><td>${r[1] === '필수' ? '<span class="ap s2">필수</span>' : '<span class="ap">선택</span>'}</td><td class="r">${r[2]}</td></tr>`).join('');
   return `
   ${ccBar('건설 DX · 스마트CM 점검 플랫폼', '2026 연말 태블릿PC 사용 보고', S.isAdmin ? `<button type="button" class="btn" data-act="share">${I('link')} 현장 공유</button><a class="btn" href="#dashboard">${I('chart')} 관리자 대시보드</a>` : '')}
+  ${S.cap.loaded && S.server === false ? serverNotice() : ''}
   <div class="cc home">${left}${center}${right}</div>
   <div class="cc3">
     ${pn('설문 구성', `<div class="tb-wrap full"><table class="tb"><thead><tr><th>영역</th><th class="r">문항</th><th>평가</th></tr></thead><tbody><tr><td>1. 기본 정보</td><td class="r">8</td><td>입력</td></tr>${comp}</tbody></table></div>`)}
@@ -1037,9 +1038,17 @@ function renderSurvey(){
   </section>`).join('')}
   <div class="submit-spacer"></div>`;
 }
+function serverHint(){
+  const m = S.serverErr || '';
+  if (m === 'NETWORK') return '인터넷 연결을 확인한 뒤 페이지를 새로 고쳐 주세요.';
+  if (/^HTTP 404/.test(m)) return '사이트의 서버 기능(api)을 찾지 못했습니다. Vercel에 배포된 주소(○○.vercel.app)로 열었는지 확인해 주세요.';
+  if (/저장소|Blob/.test(m)) return m;
+  return (m ? `(${m}) ` : '') + '잠시 후 페이지를 새로 고쳐 주세요.';
+}
+function serverNotice(){ return `<div class="notice warn">${I('alert')}<div><b>서버에 연결하지 못했습니다.</b> ${esc(serverHint())} 작성한 내용은 이 기기에 남아 있습니다.</div></div>`; }
 function surveyNotice(){
   const out = [];
-  if (S.cap.loaded && S.server === false) out.push(`<div class="notice warn">${I('alert')}<div>서버에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 페이지를 새로 고쳐 주세요. 작성한 내용은 이 기기에 남아 있습니다.</div></div>`);
+  if (S.cap.loaded && S.server === false) out.push(serverNotice());
   if (S.mine.length){
     out.push(`<div class="notice info">${I('info')}<div class="mine">이 기기에서 이미 ${S.mine.length}건을 제출했습니다. 다른 기기나 현장을 보고할 때만 새로 작성해 주세요.<ul>${S.mine.slice(0, 3).map(r => `<li>${esc(r.info.site)} · ${esc(r.info.device || '')} · ${esc(r.info.date)}</li>`).join('')}</ul></div></div>`);
   }
@@ -1320,7 +1329,7 @@ const GCOL = { A: 'var(--gA)', B: 'var(--gB)', C: 'var(--gC)' };
 function badge(g){ return `<span class="badge ${g}">${I('trophy')}${g}</span>`; }
 function renderDashboard(){
   if (!S.cap.loaded) return `<div class="card loading-card"><span class="spin"></span>불러오는 중입니다…</div>`;
-  if (!S.isAdmin) return `<section class="pn lock-pn">${I('lock')}<div><h2 class="card-title">관리자 로그인</h2><p class="card-sub" style="margin-top:8px">대시보드는 관리자 비밀번호로만 열 수 있습니다.</p></div><form id="login-form" class="login-row"><input class="inp" type="password" id="admin-pw" autocomplete="current-password" placeholder="관리자 비밀번호" aria-label="관리자 비밀번호"><button class="btn primary" type="submit" id="login-btn">로그인</button></form><a class="linkbtn" href="#survey">현장 설문으로 가기</a></section>`;
+  if (!S.isAdmin) return `<section class="pn lock-pn">${I('lock')}<div><h2 class="card-title">관리자 로그인</h2><p class="card-sub" style="margin-top:8px">대시보드는 관리자 비밀번호로만 열 수 있습니다.</p></div>${S.server === false ? serverNotice() : ''}<form id="login-form" class="login-row"><input class="inp" type="password" id="admin-pw" autocomplete="current-password" placeholder="관리자 비밀번호" aria-label="관리자 비밀번호"><button class="btn primary" type="submit" id="login-btn">로그인</button></form><a class="linkbtn" href="#survey">현장 설문으로 가기</a></section>`;
   if (!S.respLoaded) return `<div class="card loading-card"><span class="spin"></span>응답을 불러오는 중입니다…</div>`;
   const list = data(), st = basic(list), sample = isSample(), c = S.config, reg = c.sites.length;
 
