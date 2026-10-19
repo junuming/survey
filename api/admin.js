@@ -1,7 +1,9 @@
 // 관리자 전용: 전체 응답 조회, 응답 삭제(사진 포함), 설정 저장
 import { json, fail, isAdmin, listAll, readJson, putJson, remove, getConfig, normalizeConfig, mapLimit, photoPaths, CONFIG_PATH, PHOTO_ID } from '../lib/store.js';
+import { useRequestAuth } from '../lib/store.js';
 
 export async function GET(request) {
+  useRequestAuth(request);
   if (!isAdmin(request)) return json({ error: 'AUTH' }, 401);
   try {
     const blobs = await listAll('responses/');
@@ -16,6 +18,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  useRequestAuth(request);
   if (!isAdmin(request)) return json({ error: 'AUTH' }, 401);
   let body;
   try { body = await request.json(); } catch (e) { return fail('잘못된 요청입니다.'); }

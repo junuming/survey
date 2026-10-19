@@ -1,9 +1,11 @@
 // 누구나: 설문 1건 제출 → responses/<현장 키>/<응답ID>.json
 import { json, fail, putJson, responsePath, PHOTO_ID } from '../lib/store.js';
+import { useRequestAuth } from '../lib/store.js';
 
 const str = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : '';
 
 export async function POST(request) {
+  useRequestAuth(request);
   let body;
   try { body = await request.json(); } catch (e) { return fail('잘못된 요청입니다.'); }
   const r = body && body.resp;

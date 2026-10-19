@@ -1,7 +1,9 @@
 // 관리자 전용: 비공개 저장소의 사진을 보여줌. ?id=<사진ID>&t=1 이면 썸네일
 import { fail, isAdmin, readBlob, photoPaths, PHOTO_ID } from '../lib/store.js';
+import { useRequestAuth } from '../lib/store.js';
 
 export async function GET(request) {
+  useRequestAuth(request);
   if (!isAdmin(request)) return fail('AUTH', 401);
   const q = new URL(request.url).searchParams;
   const id = q.get('id') || '';
