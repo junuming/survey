@@ -1,0 +1,16 @@
+{
+  "name": "스마트CM 태블릿PC 사용 보고",
+  "short_name": "스마트CM 보고",
+  "description": "2026 연말 태블릿PC 사용 보고 설문 — 인터넷이 없어도 작성하고, 연결되면 자동으로 전송합니다.",
+  "lang": "ko",
+  "start_url": "/?source=app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#edf0f7",
+  "theme_color": "#102079",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

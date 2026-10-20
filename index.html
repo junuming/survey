@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>스마트CM 태블릿PC 사용 보고</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#102079">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap">
@@ -512,6 +516,11 @@ button.core-t:hover{border-color:var(--accent)}
 .qr-box svg{width:100%;height:100%;display:block}
 .qr-box svg rect[fill="#ffffff"],.qr-box svg rect[fill="white"]{fill:#ffffff}
 .qr-box svg path{fill:#102079}
+.pend{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-radius:12px;padding:12px 14px;margin-top:12px;background:var(--warn-bg);font-size:13.5px}
+.pend b{font-weight:700}
+.pill-wait{display:inline-block;font-size:11.5px;font-weight:700;color:var(--warn);background:var(--warn-bg);border-radius:999px;padding:1px 8px;margin-left:6px;white-space:nowrap}
+.done-ic.wait{background:var(--warn-bg);color:var(--warn)}
+.inst{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:10px}
 .lock-pn{max-width:560px;margin:40px auto;text-align:center;align-items:center;gap:14px;padding:40px 28px}
 .lock-pn .ic{width:34px;height:34px;color:var(--accent)}
 .login-row{display:flex;gap:8px;width:100%;max-width:360px}
@@ -829,17 +838,25 @@ function call(fn){ return API[fn].apply(null, Array.prototype.slice.call(argumen
 function errText(e){ return String((e && e.message) || e || ''); }
 function loadMine(){ try { const v = JSON.parse(localStorage.getItem(MINE_KEY) || '[]'); return Array.isArray(v) ? v.filter(r => r && r.info) : []; } catch (e) { return []; } }
 function saveMine(){ try { localStorage.setItem(MINE_KEY, JSON.stringify(S.mine.slice(0, 30))); } catch (e) {} }
+const PUB_KEY = 'smartcm-public-cache';
+function applyPublic(pub){
+  if (!pub) return;
+  S.config = normCfg(pub.config || {}); S.cfgLoaded = true;
+  S.summary = { total: pub.total || 0, sites: pub.sites || 0 };
+  try { localStorage.setItem(PUB_KEY, JSON.stringify(pub)); } catch (e) {}
+}
+function cachedPublic(){ try { return JSON.parse(localStorage.getItem(PUB_KEY) || 'null'); } catch (e) { return null; } }
 async function init(){
   S.mine = loadMine();
-  try {
-    const pub = await call('apiPublic');
-    S.config = normCfg((pub && pub.config) || {}); S.cfgLoaded = true;
-    S.summary = { total: (pub && pub.total) || 0, sites: (pub && pub.sites) || 0 };
-    S.server = true;
-  } catch (e) { S.server = false; S.serverErr = errText(e); }
+  const cached = cachedPublic();
+  if (cached) applyPublic(cached);
+  try { applyPublic(await call('apiPublic')); S.server = true; }
+  catch (e) { S.server = false; S.serverErr = errText(e); }
   S.cap.loaded = true;
+  await updatePending();
   if (S.server) await loadAdmin('', true);
   onData('cap');
+  if (S.server && S.pending) flushAndReport(false);
 }
 async function loadAdmin(_pw, silent){
   try {
@@ -887,17 +904,171 @@ function normCfg(d){
   return c;
 }
 function onData(kind){
+  if (S.route === 'survey' && S.ui.submitted && kind === 'pending'){ const w = !!S.mine.find(m => m.rid === S.ui.submitted.rid && m.pending); if (!w && S.ui.submitted.queued){ S.ui.submitted = Object.assign({}, S.ui.submitted, { queued: false }); render(); } return; }
   if (S.route === 'survey'){
     if (kind === 'cap' && !S.ui.touched) { render(); return; }
     patchSurvey(kind);
   } else render();
 }
 
+/* ---------- offline storage (IndexedDB) ---------- */
+const IDB = (() => {
+  let dbp = null;
+  function open(){
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      if (!('indexedDB' in window)) { rej(new Error('NO_IDB')); return; }
+      const r = indexedDB.open('smartcm-offline', 1);
+      r.onupgradeneeded = () => { const d = r.result; ['photos', 'outbox'].forEach(n => { if (!d.objectStoreNames.contains(n)) d.createObjectStore(n); }); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error || new Error('IDB'));
+    });
+    dbp.catch(() => { dbp = null; });
+    return dbp;
+  }
+  async function tx(store, mode, fn){
+    const d = await open();
+    return new Promise((res, rej) => {
+      const t = d.transaction(store, mode), req = fn(t.objectStore(store));
+      let out;
+      if (req) req.onsuccess = () => { out = req.result; };
+      t.oncomplete = () => res(out);
+      t.onerror = () => rej(t.error || new Error('IDB'));
+      t.onabort = () => rej(t.error || new Error('IDB'));
+    });
+  }
+  return {
+    get: (st, k) => tx(st, 'readonly', s => s.get(k)),
+    put: (st, k, v) => tx(st, 'readwrite', s => s.put(v, k)),
+    del: (st, k) => tx(st, 'readwrite', s => s.delete(k)),
+    all: st => tx(st, 'readonly', s => s.getAll()),
+    keys: st => tx(st, 'readonly', s => s.getAllKeys())
+  };
+})();
+const isLocal = id => typeof id === 'string' && id[0] === 'L';
+function newLocalId(){ return 'L' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('').slice(0, 23); }
+async function keepPhoto(blob){
+  const id = newLocalId();
+  try {
+    await IDB.put('photos', id, { blob, at: Date.now() });
+    try { PREV[id] = URL.createObjectURL(blob); } catch (e) {}
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+    return id;
+  } catch (e) {
+    if (e && e.name === 'QuotaExceededError') throw { code: 'quota' };
+    return (await uploadOne(blob)).id;   // 기기에 보관할 수 없으면 바로 올림 (인터넷 필요)
+  }
+}
+async function pruneMissingPhotos(){
+  let changed = false;
+  for (const k of Object.keys(S.form.photos)){
+    const keep = [];
+    for (const id of S.form.photos[k]){
+      if (!isLocal(id)) { keep.push(id); continue; }
+      let rec = null; try { rec = await IDB.get('photos', id); } catch (e) {}
+      if (rec && rec.blob) keep.push(id); else changed = true;
+    }
+    S.form.photos[k] = keep;
+  }
+  if (changed) saveDraft();
+  return changed;
+}
+
+/* outbox: 제출한 설문을 기기에 보관했다가, 인터넷이 되면 사진부터 올리고 응답을 보냄 */
+S.pending = 0;
+function setSendMsg(msg){ S.ui.sendMsg = msg; const b = $('#btn-submit'); if (b && S.ui.submitting) b.textContent = msg || '제출하는 중…'; }
+async function updatePending(){ try { S.pending = (await IDB.keys('outbox')).length; } catch (e) { S.pending = 0; } return S.pending; }
+function markMineSent(rid){ const m = S.mine.find(x => x.rid === rid); if (m && m.pending){ m.pending = false; saveMine(); } }
+let flushing = null;
+function flushOutbox(){ if (!flushing) flushing = doFlush().finally(() => { flushing = null; }); return flushing; }
+async function doFlush(){
+  let items = [];
+  try { items = await IDB.all('outbox'); } catch (e) { return { sent: 0, left: 0 }; }
+  items.sort((a, b) => String(a.queuedAt).localeCompare(String(b.queuedAt)));
+  const total = items.reduce((n, it) => n + Object.values(it.resp.photos || {}).reduce((m, l) => m + l.filter(isLocal).length, 0), 0);
+  let done = 0, sent = 0, offline = false;
+  for (const it of items){
+    try {
+      const ph = it.resp.photos || {};
+      for (const k of Object.keys(ph)){
+        for (let n = 0; n < ph[k].length; n++){
+          const id = ph[k][n];
+          if (!isLocal(id)) continue;
+          if (total) setSendMsg(`사진 보내는 중… ${done + 1}/${total}`);
+          let rec = null; try { rec = await IDB.get('photos', id); } catch (e) {}
+          if (!rec || !rec.blob){ ph[k].splice(n, 1); n--; continue; }
+          let up;
+          try { up = await uploadOne(rec.blob); }
+          catch (e) { if (/용량|파일만|빈 파일/.test(errText(e))) { ph[k].splice(n, 1); n--; continue; } throw e; }
+          ph[k][n] = up.id; done++;
+          if (PREV[id]) PREV[up.id] = PREV[id];
+          await IDB.put('outbox', it.rid, it);
+          IDB.del('photos', id).catch(() => {});
+        }
+        if (!ph[k].length) delete ph[k];
+      }
+      setSendMsg('설문 보내는 중…');
+      await call('apiSubmit', it.resp);
+      await IDB.del('outbox', it.rid);
+      markMineSent(it.rid); sent++;
+    } catch (e) {
+      it.tries = (it.tries || 0) + 1; it.lastErr = errText(e);
+      try { await IDB.put('outbox', it.rid, it); } catch (x) {}
+      if (errText(e) === 'NETWORK') { offline = true; break; }
+    }
+  }
+  setSendMsg('');
+  const left = await updatePending();
+  if (sent) S.server = true;
+  return { sent, left, offline };
+}
+async function flushAndReport(manual){
+  if (navigator.onLine === false){ if (manual) toast('인터넷에 연결되어 있지 않습니다. 연결되면 자동으로 보냅니다.'); return; }
+  const before = S.pending;
+  const r = await flushOutbox();
+  if (r.sent){ toast(`보관 중이던 설문 ${r.sent}건을 보냈습니다.`, 4200); refreshPublic(); }
+  else if (manual && before) toast(r.offline ? '인터넷에 연결되어 있지 않습니다. 연결되면 자동으로 보냅니다.' : '보내지 못했습니다. 잠시 후 다시 시도해 주세요.');
+  if (r.sent || before !== r.left) onData('pending');
+}
+async function refreshPublic(){
+  try { const pub = await call('apiPublic'); applyPublic(pub); S.server = true; S.serverErr = ''; onData('summary'); }
+  catch (e) {}
+}
+window.addEventListener('online', () => { refreshPublic().then(() => flushAndReport(false)); });
+window.addEventListener('offline', () => { S.server = false; S.serverErr = 'NETWORK'; onData('net'); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.pending) flushAndReport(false); });
+setInterval(() => { if (S.pending && navigator.onLine !== false && document.visibilityState === 'visible') flushAndReport(false); }, 60000);
+
+/* 앱 설치(홈 화면에 추가) */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (S.route === 'home') render(); });
+window.addEventListener('appinstalled', () => { installEvt = null; toast('홈 화면에 설치했습니다.'); if (S.route === 'home') render(); });
+const isStandalone = () => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; } catch (e) { return false; } };
+const inKakao = /KAKAOTALK/i.test(navigator.userAgent || '');
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
+}
+
 /* ---------- photo previews ---------- */
 const PREV = {};
 const PH_BLANK = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" fill="#e7ebf5"/><path d="M12 27l6-7 4 5 3-3 5 5z" fill="#9aa5c8"/><circle cx="26" cy="15" r="3" fill="#9aa5c8"/></svg>');
 const photoUrl = (id, thumb) => '/api/photo?id=' + encodeURIComponent(id) + (thumb ? '&t=1' : '');
-function photoSrc(id){ return PREV[id] || (S.isAdmin ? photoUrl(id, true) : PH_BLANK); }
+function photoSrc(id){ return PREV[id] || (!isLocal(id) && S.isAdmin ? photoUrl(id, true) : PH_BLANK); }
+let hyT = null;
+function hydrateThumbs(){
+  $$('img[data-pid]').forEach(im => {
+    const id = im.dataset.pid;
+    if (!isLocal(id) || im.dataset.h) return;
+    if (PREV[id]) { if (im.src !== PREV[id]) im.src = PREV[id]; return; }
+    im.dataset.h = '1';
+    IDB.get('photos', id).then(rec => {
+      if (!rec || !rec.blob) return;
+      PREV[id] = PREV[id] || URL.createObjectURL(rec.blob);
+      $$('img[data-pid]').forEach(x => { if (x.dataset.pid === id) x.src = PREV[id]; });
+    }).catch(() => {});
+  });
+}
+new MutationObserver(() => { clearTimeout(hyT); hyT = setTimeout(hydrateThumbs, 60); }).observe(document.body, { childList: true, subtree: true });
 
 /* ---------- router ---------- */
 function routeFromHash(){ const h = (location.hash || '').replace('#', ''); return h === 'survey' || h === 'dashboard' ? h : 'home'; }
@@ -951,23 +1122,25 @@ function renderHome(){
       <a class="cta-big" href="#survey">${I('clip')} ${started ? '이어서 작성하기' : '설문 참여하기'} ${I('arrow')}</a>
       ${started ? `<div class="cta-prog"><i style="width:${p.pct}%"></i></div><p class="cta-note">진행률 ${p.pct}% · 작성 중인 내용은 이 기기에 저장되어 있습니다</p>` : `<p class="cta-note">39문항 · 기기 사진 첨부 포함</p>`}
       ${c.deadline ? `<p class="cta-note"><b>제출 마감 ${esc(c.deadline)}</b> · ${dday(c.deadline)}</p>` : ''}
-      ${mine.length ? `<p class="cta-note">이 기기에서 이미 ${mine.length}건을 제출했습니다. 다른 기기나 현장을 보고할 때만 새로 작성해 주세요.</p>` : ''}`)}
+      ${mine.length ? `<p class="cta-note">이 기기에서 이미 ${mine.length}건을 제출했습니다. 다른 기기나 현장을 보고할 때만 새로 작성해 주세요.</p>` : ''}
+      ${pendingNotice()}
+      ${!isStandalone() ? `<div class="inst">${installEvt ? `<button type="button" class="btn" data-act="install">${I('dl')} 홈 화면에 앱으로 설치</button>` : ''}${inKakao ? `<a class="btn" href="kakaotalk://web/openExternal?url=${encodeURIComponent(location.origin + '/?page=survey')}">${I('link')} 다른 브라우저로 열기</a>` : ''}</div>` : ''}`)}
     ${pn('작성 순서', `<ol class="steps">
       <li><span><b>기본 정보</b>현장명, 점검자, 기기 사용 시작 월을 입력합니다.</span></li>
       <li><span><b>문항 응답</b>6개 영역 39문항에 버튼으로 답합니다. 필수는 36문항입니다.</span></li>
       <li><span><b>사진 첨부</b>기기 전면·후면 사진과 불량 부위 사진을 올립니다.</span></li>
-      <li><span><b>제출</b>제출하면 내 연간 활용도 점수를 바로 확인할 수 있습니다.</span></li></ol>`)}
+      <li><span><b>제출</b>제출하면 내 연간 활용도 점수를 바로 확인할 수 있습니다. 인터넷이 없으면 기기에 보관했다가 자동으로 보냅니다.</span></li></ol>`)}
   </div>`;
   const center = `<section class="pn cc-center"><div class="pn-h ctr"><h2>참여 현황</h2><span>개별 현장의 점수는 관리자만 볼 수 있습니다</span></div><div class="core">
     ${core('전체 제출', total, '건', null, { sub: '전체 현장 합계' })}
     ${core('참여 현장', sites, reg ? ` / ${reg}` : '개소', reg ? sites / reg * 100 : null, { sub: reg ? `등록 현장 ${reg}곳 중` : '' })}
-    ${core('내 제출', mine.length, '건', null, { sub: last ? `최근 ${esc(last.info.date)}` : '아직 없음' })}
+    ${core('내 제출', mine.length, '건', null, { sub: S.pending ? `전송 대기 ${S.pending}건` : last ? `최근 ${esc(last.info.date)}` : '아직 없음' })}
     ${core('작성 중 진행률', started ? p.pct : 0, '%', started ? p.pct : 0, { sub: started ? `${p.done} / ${p.total} 문항` : '작성 전' })}
     ${core('내 활용도 점수', lx ? fmt1(lx.score) : '-', '점', lx ? lx.score : 0, { sub: lx ? `최근 제출 · ${gradeOf(lx.score)}등급` : '제출 후 표시' })}
     ${core('내 기기 불량 항목', last ? lbad : '-', '건', null, { red: lbad > 0, sub: last ? (lbad ? '관리자에게 접수됨' : '모든 항목 양호·보통') : '제출 후 표시' })}
   </div></section>`;
   const right = `<div class="cc-col">
-    ${pn('이 기기의 제출 내역', mine.length ? `<div class="tb-wrap"><table class="tb"><thead><tr><th>현장</th><th>점검일</th><th class="r">점수</th><th class="c">등급</th></tr></thead><tbody>${mine.map(r => { const x = scoresOf(r.a || {}); return `<tr><td class="nm">${esc(r.info.site)}<div class="muted" style="font-size:12px">${esc(r.info.device || '')}</div></td><td>${esc(r.info.date)}</td><td class="r">${fmt1(x.score)}</td><td class="c">${badge(gradeOf(x.score))}</td></tr>`; }).join('')}</tbody></table></div>` : `<p class="pn-empty">이 기기에서 제출한 설문이 없습니다.<br>제출하면 여기에 내 결과만 표시됩니다.</p>`, mine.length ? `${mine.length}건` : '')}
+    ${pn('이 기기의 제출 내역', mine.length ? `<div class="tb-wrap"><table class="tb"><thead><tr><th>현장</th><th>점검일</th><th class="r">점수</th><th class="c">등급</th></tr></thead><tbody>${mine.map(r => { const x = scoresOf(r.a || {}); return `<tr><td class="nm">${esc(r.info.site)}${r.pending ? '<span class="pill-wait">전송 대기</span>' : ''}<div class="muted" style="font-size:12px">${esc(r.info.device || '')}</div></td><td>${esc(r.info.date)}</td><td class="r">${fmt1(x.score)}</td><td class="c">${badge(gradeOf(x.score))}</td></tr>`; }).join('')}</tbody></table></div>` : `<p class="pn-empty">이 기기에서 제출한 설문이 없습니다.<br>제출하면 여기에 내 결과만 표시됩니다.</p>`, mine.length ? `${mine.length}건` : '')}
     ${pn('등급 기준', `<div class="gl-list">
       <div class="gl-item">${badge('A')}<span>${c.gradeA}점 이상 · 태블릿을 대부분의 업무에 활용</span></div>
       <div class="gl-item">${badge('B')}<span>${c.gradeB}점 이상 ${c.gradeA}점 미만</span></div>
@@ -979,21 +1152,22 @@ function renderHome(){
     .map(r => `<tr><td>${r[0]}</td><td>${r[1] === '필수' ? '<span class="ap s2">필수</span>' : '<span class="ap">선택</span>'}</td><td class="r">${r[2]}</td></tr>`).join('');
   return `
   ${ccBar('건설 DX · 스마트CM 점검 플랫폼', '2026 연말 태블릿PC 사용 보고', S.isAdmin ? `<button type="button" class="btn" data-act="share">${I('link')} 현장 공유</button><a class="btn" href="#dashboard">${I('chart')} 관리자 대시보드</a>` : '')}
-  ${S.cap.loaded && S.server === false ? serverNotice() : ''}
+  ${S.cap.loaded && S.server === false ? netNotice() : ''}
   <div class="cc home">${left}${center}${right}</div>
   <div class="cc3">
     ${pn('설문 구성', `<div class="tb-wrap full"><table class="tb"><thead><tr><th>영역</th><th class="r">문항</th><th>평가</th></tr></thead><tbody><tr><td>1. 기본 정보</td><td class="r">8</td><td>입력</td></tr>${comp}</tbody></table></div>`)}
     ${pn('사진 첨부 안내', `<div class="tb-wrap full"><table class="tb"><thead><tr><th>문항</th><th>구분</th><th class="r">장수</th></tr></thead><tbody>${photoRows}</tbody></table></div>`)}
     ${pn('작성 도움말', `<ul class="tips">
-      <li>[카메라로 촬영]은 태블릿 후면 카메라를 바로 엽니다. 사진은 올리기 전에 자동으로 용량을 줄입니다.</li>
-      <li>통신이 끊겨도 작성한 내용은 이 기기에 남아 있습니다. 다시 열면 이어서 작성할 수 있습니다.</li>
+      <li><b>인터넷이 안 되는 현장에서도</b> 작성·사진 첨부·제출을 할 수 있습니다. 제출한 설문은 기기에 보관했다가 인터넷이 연결되면 자동으로 보냅니다.</li>
+      <li>처음 한 번은 인터넷이 될 때 이 사이트를 열어 두세요. 브라우저 메뉴(⋮)에서 <b>홈 화면에 추가</b>하면 다음부터 아이콘으로 바로 열립니다.</li>
+      <li>[카메라로 촬영]은 태블릿 후면 카메라를 바로 엽니다. 사진은 자동으로 용량을 줄여 저장합니다.</li>
       <li>빠진 필수 항목이 있으면 제출 버튼을 눌렀을 때 해당 문항으로 이동합니다.</li>
       <li>기기가 여러 대이면 기기마다 한 번씩 제출해 주세요.</li></ul>`)}
   </div>`;
 }
 
 /* ---------- survey ---------- */
-function assetsOn(){ return S.server !== false; }
+function assetsOn(){ return true; }
 function photoList(k){ return S.form.photos[k] || []; }
 function infoMissing(){
   const f = S.form.info, m = [];
@@ -1045,10 +1219,15 @@ function serverHint(){
   if (/저장소|Blob/.test(m)) return m;
   return (m ? `(${m}) ` : '') + '잠시 후 페이지를 새로 고쳐 주세요.';
 }
-function serverNotice(){ return `<div class="notice warn">${I('alert')}<div><b>서버에 연결하지 못했습니다.</b> ${esc(serverHint())} 작성한 내용은 이 기기에 남아 있습니다.</div></div>`; }
+function isOffline(){ return S.server === false && (S.serverErr === 'NETWORK' || navigator.onLine === false); }
+function offlineNotice(){ return `<div class="notice info">${I('info')}<div><b>인터넷에 연결되어 있지 않습니다.</b> 설문 작성과 사진 첨부는 그대로 할 수 있습니다. 제출하면 이 기기에 보관했다가 인터넷이 연결되면 자동으로 보냅니다.</div></div>`; }
+function netNotice(){ return isOffline() ? offlineNotice() : serverNotice(); }
+function pendingNotice(){ return S.pending ? `<div class="pend"><span>${I('alert')} <b>전송 대기 ${S.pending}건</b> · 인터넷이 연결되면 자동으로 보냅니다.</span><button type="button" class="btn sm" data-act="flush">지금 보내기</button></div>` : ''; }
+function serverNotice(){ return `<div class="notice warn">${I('alert')}<div><b>서버에 연결하지 못했습니다.</b> ${esc(serverHint())} 작성한 내용은 이 기기에 남아 있고, 제출하면 보관했다가 연결되면 자동으로 보냅니다.</div></div>`; }
 function surveyNotice(){
   const out = [];
-  if (S.cap.loaded && S.server === false) out.push(serverNotice());
+  if (S.cap.loaded && S.server === false) out.push(netNotice());
+  if (S.pending) out.push(pendingNotice());
   if (S.mine.length){
     out.push(`<div class="notice info">${I('info')}<div class="mine">이 기기에서 이미 ${S.mine.length}건을 제출했습니다. 다른 기기나 현장을 보고할 때만 새로 작성해 주세요.<ul>${S.mine.slice(0, 3).map(r => `<li>${esc(r.info.site)} · ${esc(r.info.device || '')} · ${esc(r.info.date)}</li>`).join('')}</ul></div></div>`);
   }
@@ -1156,7 +1335,7 @@ function updateProgress(){
   const b = $('#btn-submit');
   b.classList.toggle('ready', !left);
   b.disabled = S.ui.submitting;
-  b.textContent = S.ui.submitting ? '제출하는 중…' : '설문 제출하기';
+  b.textContent = S.ui.submitting ? (S.ui.sendMsg || '제출하는 중…') : '설문 제출하기';
 }
 function patchSurvey(kind){
   const n = $('#survey-notice'); if (n) n.innerHTML = surveyNotice();
@@ -1167,11 +1346,12 @@ function patchSurvey(kind){
 function renderSubmitted(){
   const r = S.ui.submitted, x = scoresOf(r.a);
   return `<section class="card done-card">
-    <div class="done-ic">${I('check')}</div>
-    <h2>제출이 완료되었습니다</h2>
+    <div class="done-ic${r.queued ? ' wait' : ''}">${I(r.queued ? 'refresh' : 'check')}</div>
+    <h2>${r.queued ? '이 기기에 저장했습니다' : '제출이 완료되었습니다'}</h2>
     <p>${esc(r.info.site)} · ${esc(r.info.inspector)} · ${esc(r.info.date)}</p>
+    ${r.queued ? `<p style="margin-top:10px">인터넷이 연결되면 사진과 함께 자동으로 보냅니다.<br>인터넷이 되는 곳에서 이 사이트를 한 번 열어 주세요.</p>` : ''}
     <div class="done-score"><div><span>연간 활용도 점수</span><b class="num">${fmt1(x.score)}점</b></div><div><span>첨부 사진</span><b class="num">${Object.values(r.photos).reduce((n, l) => n + l.length, 0)}장</b></div></div>
-    <div class="done-acts"><button type="button" class="btn primary" data-act="new-survey">새 설문 작성</button><a class="btn" href="#">홈으로</a></div>
+    <div class="done-acts">${r.queued ? `<button type="button" class="btn primary" data-act="flush-done">지금 보내기</button>` : ''}<button type="button" class="btn${r.queued ? '' : ' primary'}" data-act="new-survey">새 설문 작성</button><a class="btn" href="#">홈으로</a></div>
   </section>`;
 }
 
@@ -1202,7 +1382,9 @@ function photoErrMsg(e){
   if (c === 'quota_or_state') return '저장 공간이 가득 찼습니다. 관리자에게 알려 주세요.';
   if (c === 'rate_limited') return '잠시 후 다시 시도해 주세요.';
   if (c === 'not_granted' || c === 'capability_disabled') return '사진을 올릴 권한이 없습니다.';
-  return '업로드에 실패했습니다. 통신 상태를 확인해 주세요.';
+  if (c === 'quota') return '기기 저장 공간이 부족해 사진을 저장하지 못했습니다.';
+  if (errText(e) === 'NETWORK') return '인터넷에 연결되어 있지 않아 사진을 저장하지 못했습니다.';
+  return '사진을 저장하지 못했습니다. 다시 시도해 주세요.';
 }
 async function makeThumb(blob){
   try {
@@ -1234,8 +1416,8 @@ async function handleFiles(k, files){
     S.ui.uploading[k] = (S.ui.uploading[k] || 0) + 1; rerenderPhotos(k);
     try {
       const blob = await compress(f);
-      const r = await uploadOne(blob);
-      (S.form.photos[k] = S.form.photos[k] || []).push(r.id); saveDraft();
+      const id = await keepPhoto(blob);
+      (S.form.photos[k] = S.form.photos[k] || []).push(id); saveDraft();
     } catch (e) {
       S.ui.photoErr[k] = photoErrMsg(e);
       if (!(e && e.code === 'decode')) S.ui.failed[k].push(f);
@@ -1256,6 +1438,8 @@ function cleanAnswers(){
   return { a, ph };
 }
 async function submit(){
+  if (S.ui.submitting) return;
+  if (await pruneMissingPhotos()) Object.keys(PHOTO_KEYS).forEach(k => { const blk = $(`.photos[data-pq="${k}"]`); if (blk) blk.outerHTML = photoBlock(k); });
   const qMiss = REQUIRED.filter(q => !qComplete(q)), iMiss = infoMissing();
   if (qMiss.length || iMiss.length){
     S.ui.showMissing = true;
@@ -1266,8 +1450,7 @@ async function submit(){
     toast(`필수 항목 ${qMiss.length + iMiss.length}개를 확인해 주세요.`);
     return;
   }
-  if (S.server === false){ toast('서버에 연결되지 않았습니다. 새로 고친 뒤 다시 제출해 주세요.'); return; }
-  if (Object.values(S.ui.uploading).some(n => n > 0)){ toast('사진 업로드가 끝난 뒤 제출해 주세요.'); return; }
+  if (Object.values(S.ui.uploading).some(n => n > 0)){ toast('사진을 저장하는 중입니다. 잠시 후 다시 눌러 주세요.'); return; }
   const f = S.form.info, { a, ph } = cleanAnswers(), sc = scoresOf(a);
   const resp = {
     rid: S.form.rid, v: 1, year: 2026, submittedAt: new Date().toISOString(),
@@ -1281,7 +1464,23 @@ async function submit(){
     .concat(STATUS_QS.map(q => [`${q.id} 불량 사유`, a[q.id + '_reason'] || '']))
     .concat([['4-4 기타 업무', a['4-4_etc'] || '']]);
   S.ui.submitting = true; updateProgress();
+  let queued = false;
+  try { await IDB.put('outbox', resp.rid, { rid: resp.rid, resp, queuedAt: new Date().toISOString(), tries: 0 }); queued = true; } catch (e) {}
+  if (queued){
+    S.mine.unshift({ rid: resp.rid, submittedAt: resp.submittedAt, info: resp.info, a: resp.a, pending: true }); saveMine();
+    clearDraft(); S.form = newForm(); S.ui.showMissing = false; S.ui.touched = false;
+    await updatePending();
+    let r = { sent: 0 };
+    if (navigator.onLine !== false) { try { r = await flushOutbox(); } catch (e) {} }
+    const waiting = !!S.mine.find(m => m.rid === resp.rid && m.pending);
+    S.ui.submitted = Object.assign({}, resp, { queued: waiting });
+    S.ui.submitting = false; setSendMsg(''); render(); window.scrollTo(0, 0);
+    if (!waiting) refreshPublic();
+    return;
+  }
+  // 기기에 보관할 수 없는 브라우저: 바로 보냄
   try {
+    if (Object.values(resp.photos).some(l => l.some(isLocal))) throw new Error('NETWORK');
     await call('apiSubmit', resp, flat);
     S.mine.unshift({ rid: resp.rid, submittedAt: resp.submittedAt, info: resp.info, a: resp.a }); saveMine();
     if (S.summary) S.summary.total = (S.summary.total || 0) + 1;
@@ -1833,7 +2032,7 @@ document.addEventListener('click', e => {
     case 'rm-photo': {
       const id = t.dataset.id;
       S.form.photos[q] = photoList(q).filter(x => x !== id); saveDraft();
-      call('apiDeletePhoto', id).catch(() => {});
+      if (isLocal(id)) IDB.del('photos', id).catch(() => {}); else call('apiDeletePhoto', id).catch(() => {});
       rerenderPhotos(q); updateProgress(); break;
     }
     case 'retry-photo': { const files = (S.ui.failed[q] || []).slice(); S.ui.failed[q] = []; handleFiles(q, files); break; }
@@ -1859,6 +2058,9 @@ document.addEventListener('click', e => {
     case 'row-del-cancel': S.ui.confirmRow = null; refreshRows(); break;
     case 'share': openModal(shareHtml()); break;
     case 'refresh': refreshAdmin(false); break;
+    case 'flush': flushAndReport(true); break;
+    case 'flush-done': flushAndReport(true).then(() => { if (S.ui.submitted && !S.mine.find(m => m.rid === S.ui.submitted.rid && m.pending)) { S.ui.submitted = Object.assign({}, S.ui.submitted, { queued: false }); render(); } }); break;
+    case 'install': if (installEvt) { installEvt.prompt(); installEvt.userChoice.finally(() => { installEvt = null; render(); }); } break;
     case 'export-csv': exportCsv(); break;
     case 'export-zip': exportZip(); break;
     case 'logout': adminLogout(); break;
